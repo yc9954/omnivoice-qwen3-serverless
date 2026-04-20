@@ -1,45 +1,70 @@
 """
 RunPod Serverless handler for Qwen3-TTS streaming voice cloning.
-
-Input (job.input):
-    text:           str    — text to synthesize
-    ref_audio_b64:  str    — base64-encoded reference WAV bytes
-    ref_text:       str    — reference audio transcript
-    language:       str    — "Korean" (default) / "English" / ...
-    chunk_size:     int    — streaming chunk size (default 12)
-    temperature:    float  — sampling temperature (default 0.9)
-    top_k:          int    — top-k sampling (default 50)
-    repetition_penalty: float — (default 1.05)
-
-Output (yielded chunks):
-    first chunk:  {"sr": 24000, "text_chars": N, "type": "meta"}
-    audio chunks: {"pcm_b64": <base64 int16 little-endian>, "type": "audio", "idx": i}
-    final chunk:  {"type": "done", "chunks": N, "duration": secs, "rtf": float}
-
-Env:
-    MODEL_PATH:     default "/workspace/models/Qwen3-TTS-12Hz-1.7B-Base"
-    WARMUP_ON_START: "1" to run warmup at init (recommended, costs ~6s on first boot)
 """
-import base64
-import io
-import os
-import time
-import tempfile
-from typing import Generator
+import sys
 
-import numpy as np
-import soundfile as sf
-import runpod
+# --- super-early log so we can tell whether Python even starts ---
+_BOOT_LOG = "/tmp/handler_boot.log"
+def _boot(msg: str):
+    line = f"[boot] {msg}"
+    try:
+        sys.stdout.write(line + "\n"); sys.stdout.flush()
+    except Exception:
+        pass
+    try:
+        sys.stderr.write(line + "\n"); sys.stderr.flush()
+    except Exception:
+        pass
+    try:
+        with open(_BOOT_LOG, "a") as _f:
+            _f.write(line + "\n")
+    except Exception:
+        pass
+
+_boot("python started")
+
+# --- wrap every import to catch crashes early ---
+try:
+    import base64
+    import io
+    import os
+    import time
+    import tempfile
+    import traceback
+    from typing import Generator
+    _boot("stdlib imports ok")
+
+    import numpy as np
+    _boot(f"numpy {np.__version__} ok")
+
+    import soundfile as sf
+    _boot(f"soundfile {sf.__version__} ok")
+
+    import torch as _torch
+    _boot(f"torch {_torch.__version__} cuda_avail={_torch.cuda.is_available()}")
+    if _torch.cuda.is_available():
+        _boot(f"cuda device: {_torch.cuda.get_device_name(0)}")
+
+    import runpod
+    _boot(f"runpod {getattr(runpod, '__version__', '?')} ok")
+
+    from faster_qwen3_tts import FasterQwen3TTS
+    _boot("faster_qwen3_tts ok")
+except Exception as _e:
+    _boot(f"FATAL import error: {_e!r}")
+    try:
+        import traceback as _tb
+        _tb.print_exc(file=sys.stderr)
+    except Exception:
+        pass
+    raise
 
 MODEL_PATH = os.environ.get("MODEL_PATH", "/workspace/models/Qwen3-TTS-12Hz-1.7B-Base")
 WARMUP_ON_START = os.environ.get("WARMUP_ON_START", "1") == "1"
 
 print(f"[init] loading faster-qwen3-tts from {MODEL_PATH}", flush=True)
 _t0 = time.time()
-import traceback
-import torch as _torch
 try:
-    from faster_qwen3_tts import FasterQwen3TTS
     _dtype = _torch.bfloat16 if _torch.cuda.is_available() else _torch.float32
     _device = "cuda:0" if _torch.cuda.is_available() else "cpu"
     print(f"[init] device={_device}, dtype={_dtype}", flush=True)
@@ -48,8 +73,8 @@ try:
     )
     print(f"[init] model loaded in {time.time()-_t0:.1f}s", flush=True)
 except Exception as _e:
-    print(f"[init] FATAL: model load failed: {_e}", flush=True)
-    traceback.print_exc()
+    print(f"[init] FATAL: model load failed: {_e!r}", flush=True)
+    traceback.print_exc(file=sys.stderr)
     raise
 
 if WARMUP_ON_START:

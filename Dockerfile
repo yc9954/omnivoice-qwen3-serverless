@@ -34,4 +34,5 @@ COPY handler.py /app/handler.py
 
 ENV WARMUP_ON_START=1
 
-CMD ["python", "-u", "/app/handler.py"]
+# wrapper: verify python works + capture any early crash
+CMD ["sh", "-c", "echo '[boot] sh entered'; which python3; which python; python3 --version; echo '[boot] launching handler'; exec python3 -u /app/handler.py"]
