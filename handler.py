@@ -34,11 +34,23 @@ import runpod
 MODEL_PATH = os.environ.get("MODEL_PATH", "/workspace/models/Qwen3-TTS-12Hz-1.7B-Base")
 WARMUP_ON_START = os.environ.get("WARMUP_ON_START", "1") == "1"
 
-print(f"[init] loading faster-qwen3-tts from {MODEL_PATH}")
+print(f"[init] loading faster-qwen3-tts from {MODEL_PATH}", flush=True)
 _t0 = time.time()
-from faster_qwen3_tts import FasterQwen3TTS
-_MODEL = FasterQwen3TTS.from_pretrained(MODEL_PATH)
-print(f"[init] model loaded in {time.time()-_t0:.1f}s")
+import traceback
+import torch as _torch
+try:
+    from faster_qwen3_tts import FasterQwen3TTS
+    _dtype = _torch.bfloat16 if _torch.cuda.is_available() else _torch.float32
+    _device = "cuda:0" if _torch.cuda.is_available() else "cpu"
+    print(f"[init] device={_device}, dtype={_dtype}", flush=True)
+    _MODEL = FasterQwen3TTS.from_pretrained(
+        MODEL_PATH, device_map=_device, dtype=_dtype, attn_implementation="sdpa",
+    )
+    print(f"[init] model loaded in {time.time()-_t0:.1f}s", flush=True)
+except Exception as _e:
+    print(f"[init] FATAL: model load failed: {_e}", flush=True)
+    traceback.print_exc()
+    raise
 
 if WARMUP_ON_START:
     print("[init] warmup (CUDA graph capture + kernel compilation)...")
