@@ -29,7 +29,7 @@ RUN git clone --depth=1 https://github.com/andimarafioti/faster-qwen3-tts.git /t
 
 # install flash-attn (sm_120 / Blackwell). Fall back to skip if wheel/build fails so the
 # container still runs (faster-qwen3-tts has a manual attention fallback).
-ARG SKIP_FLASH_ATTN=0
+ARG SKIP_FLASH_ATTN=1
 RUN if [ "$SKIP_FLASH_ATTN" = "1" ]; then \
       echo "SKIP_FLASH_ATTN=1, skipping"; \
     else \
