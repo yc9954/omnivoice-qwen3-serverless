@@ -1,6 +1,6 @@
 # Qwen3-TTS streaming — RunPod Serverless image
-# Base: official RunPod PyTorch 2.8 + CUDA 12.8 (Blackwell sm_120 OK)
-FROM runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu
+# Base: RunPod PyTorch 2.8 + CUDA 12.9 (Blackwell sm_120 OK), Ubuntu 22.04
+FROM runpod/pytorch:1.0.3-cu1290-torch280-ubuntu2204
 
 ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/root/.cache/huggingface \
