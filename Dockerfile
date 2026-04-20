@@ -1,7 +1,7 @@
 # Qwen3-TTS streaming — RunPod Serverless image
-# Base: RunPod PyTorch 2.8 + CUDA 12.8.1 (verified on RTX 5090 + driver 570.195.03)
-# Target GPUs: RTX 5090 (sm_120, Blackwell) only — filter endpoint GPU type to 32GB PRO
-FROM runpod/pytorch:1.0.3-cu1281-torch280-ubuntu2204
+# Base: PyTorch 2.6.0 + CUDA 12.4.1 — broadly compatible (driver 550+, all RunPod workers)
+# Earlier cu1281 still required cuda>=12.8 which ADA_32_PRO workers couldn't satisfy.
+FROM runpod/pytorch:0.7.0-cu1241-torch260-ubuntu2004
 
 ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/root/.cache/huggingface \
