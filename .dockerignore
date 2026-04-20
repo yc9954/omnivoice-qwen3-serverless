@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+.git
+.gitignore
+.DS_Store
+*.log
+test_input.json

@@ -1,0 +1,4 @@
+runpod>=1.7.0
+faster-qwen3-tts>=0.2.6
+numpy
+soundfile

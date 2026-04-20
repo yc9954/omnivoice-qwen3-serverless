@@ -1,0 +1,9 @@
+{
+  "input": {
+    "text": "안녕하세요. 이건 Qwen3-TTS 스트리밍 테스트입니다.",
+    "language": "Korean",
+    "ref_text": "네 안녕하세요 저희 스위트 스팟 피플팀인데요 네 유미님 맞으실까요? 아 네 저희 유미님 혹시",
+    "ref_audio_b64_from_file": "risher_short.wav",
+    "chunk_size": 12
+  }
+}
