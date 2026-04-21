@@ -1,20 +1,26 @@
 """
-RunPod Serverless handler for Qwen3-TTS streaming voice cloning.
+Qwen3-TTS streaming handler.
+
+Dual-mode: the same image serves either a RunPod Queue endpoint OR a
+RunPod Load Balancer endpoint, selected by SERVER_MODE.
+
+  SERVER_MODE=queue (default) → runpod.serverless.start(generator handler)
+  SERVER_MODE=http             → FastAPI on $PORT (default 80), streams NDJSON
+
+The queue path goes through RunPod's poll-based stream API (200-3000ms of
+platform-side buffering). The http path is direct chunked HTTP and sees
+the worker's true TTFA (~500ms).
 """
 import sys
 
-# --- super-early log so we can tell whether Python even starts ---
 _BOOT_LOG = "/tmp/handler_boot.log"
 def _boot(msg: str):
     line = f"[boot] {msg}"
-    try:
-        sys.stdout.write(line + "\n"); sys.stdout.flush()
-    except Exception:
-        pass
-    try:
-        sys.stderr.write(line + "\n"); sys.stderr.flush()
-    except Exception:
-        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.write(line + "\n"); stream.flush()
+        except Exception:
+            pass
     try:
         with open(_BOOT_LOG, "a") as _f:
             _f.write(line + "\n")
@@ -23,15 +29,15 @@ def _boot(msg: str):
 
 _boot("python started")
 
-# --- wrap every import to catch crashes early ---
 try:
     import base64
     import io
+    import json
     import os
     import time
     import tempfile
     import traceback
-    from typing import Generator
+    from typing import Generator, Optional
     _boot("stdlib imports ok")
 
     import numpy as np
@@ -45,23 +51,19 @@ try:
     if _torch.cuda.is_available():
         _boot(f"cuda device: {_torch.cuda.get_device_name(0)}")
 
-    import runpod
-    _boot(f"runpod {getattr(runpod, '__version__', '?')} ok")
-
     from faster_qwen3_tts import FasterQwen3TTS
     _boot("faster_qwen3_tts ok")
 except Exception as _e:
     _boot(f"FATAL import error: {_e!r}")
-    try:
-        import traceback as _tb
-        _tb.print_exc(file=sys.stderr)
-    except Exception:
-        pass
+    traceback.print_exc(file=sys.stderr)
     raise
+
 
 MODEL_PATH = os.environ.get("MODEL_PATH", "/workspace/models/Qwen3-TTS-12Hz-1.7B-Base")
 WARMUP_ON_START = os.environ.get("WARMUP_ON_START", "1") == "1"
+SERVER_MODE = os.environ.get("SERVER_MODE", "queue").lower()
 
+print(f"[init] SERVER_MODE={SERVER_MODE}", flush=True)
 print(f"[init] loading faster-qwen3-tts from {MODEL_PATH}", flush=True)
 _t0 = time.time()
 try:
@@ -98,69 +100,52 @@ if WARMUP_ON_START:
 
 
 def _float32_to_int16_b64(wav: np.ndarray) -> str:
-    """Convert float32 PCM [-1, 1] to 16-bit PCM little-endian, base64 encoded."""
     wav = np.clip(wav, -1.0, 1.0)
     pcm16 = (wav * 32767.0).astype(np.int16)
     return base64.b64encode(pcm16.tobytes()).decode("ascii")
 
 
-def handler(job) -> Generator[dict, None, None]:
-    job_input = job.get("input") or {}
-    text = job_input.get("text", "").strip()
-    ref_audio_b64 = job_input.get("ref_audio_b64")
-    ref_text = job_input.get("ref_text", "")
-    language = job_input.get("language", "Korean")
-    chunk_size = int(job_input.get("chunk_size", 12))
-    temperature = float(job_input.get("temperature", 0.9))
-    top_k = int(job_input.get("top_k", 50))
-    repetition_penalty = float(job_input.get("repetition_penalty", 1.05))
-
-    if not text:
-        yield {"type": "error", "message": "empty text"}
-        return
-    if not ref_audio_b64:
-        yield {"type": "error", "message": "ref_audio_b64 required"}
-        return
-
-    # dump ref audio to tempfile (faster-qwen3-tts expects a path)
+# ============================================================
+# Core generation — shared by both modes
+# ============================================================
+def synthesize_stream(
+    text: str,
+    ref_audio_path: str,
+    ref_text: str = "",
+    language: str = "Korean",
+    chunk_size: int = 12,
+    temperature: float = 0.9,
+    top_k: int = 50,
+    repetition_penalty: float = 1.05,
+    instruct: Optional[str] = None,
+) -> Generator[dict, None, None]:
+    """Yield event dicts: meta → audio × N → done (or error)."""
+    t0 = time.time()
+    ttfa = None
+    n_chunks = 0
+    total_samples = 0
+    sr = 24000
+    yielded_meta = False
     try:
-        audio_bytes = base64.b64decode(ref_audio_b64)
-    except Exception as e:
-        yield {"type": "error", "message": f"invalid base64: {e}"}
-        return
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    tmp.write(audio_bytes)
-    tmp.close()
-
-    try:
-        t0 = time.time()
-        ttfa = None
-        n_chunks = 0
-        total_samples = 0
-        sr = 24000
-        yielded_meta = False
+        kwargs = dict(
+            text=text, language=language,
+            ref_audio=ref_audio_path, ref_text=ref_text,
+            chunk_size=chunk_size,
+            temperature=temperature, top_k=top_k,
+            repetition_penalty=repetition_penalty,
+        )
+        if instruct:
+            kwargs["instruct"] = instruct
 
         for idx, (wav_chunk, chunk_sr, _info) in enumerate(
-            _MODEL.generate_voice_clone_streaming(
-                text=text,
-                language=language,
-                ref_audio=tmp.name,
-                ref_text=ref_text,
-                chunk_size=chunk_size,
-                temperature=temperature,
-                top_k=top_k,
-                repetition_penalty=repetition_penalty,
-            )
+            _MODEL.generate_voice_clone_streaming(**kwargs)
         ):
             if not yielded_meta:
                 sr = chunk_sr
                 yield {"type": "meta", "sr": sr, "text_chars": len(text)}
                 yielded_meta = True
-
             if ttfa is None:
                 ttfa = time.time() - t0
-
             n_chunks += 1
             total_samples += len(wav_chunk)
             yield {
@@ -183,15 +168,132 @@ def handler(job) -> Generator[dict, None, None]:
         }
     except Exception as e:
         yield {"type": "error", "message": f"{type(e).__name__}: {e}"}
+
+
+def _write_ref_tempfile(ref_audio_b64: str) -> str:
+    audio_bytes = base64.b64decode(ref_audio_b64)
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp.write(audio_bytes)
+    tmp.close()
+    return tmp.name
+
+
+# ============================================================
+# Mode: QUEUE (runpod.serverless generator handler)
+# ============================================================
+def handler(job) -> Generator[dict, None, None]:
+    job_input = job.get("input") or {}
+    text = job_input.get("text", "").strip()
+    ref_audio_b64 = job_input.get("ref_audio_b64")
+    if not text:
+        yield {"type": "error", "message": "empty text"}
+        return
+    if not ref_audio_b64:
+        yield {"type": "error", "message": "ref_audio_b64 required"}
+        return
+    try:
+        ref_path = _write_ref_tempfile(ref_audio_b64)
+    except Exception as e:
+        yield {"type": "error", "message": f"invalid base64: {e}"}
+        return
+
+    try:
+        yield from synthesize_stream(
+            text=text,
+            ref_audio_path=ref_path,
+            ref_text=job_input.get("ref_text", ""),
+            language=job_input.get("language", "Korean"),
+            chunk_size=int(job_input.get("chunk_size", 12)),
+            temperature=float(job_input.get("temperature", 0.9)),
+            top_k=int(job_input.get("top_k", 50)),
+            repetition_penalty=float(job_input.get("repetition_penalty", 1.05)),
+            instruct=job_input.get("instruct") or None,
+        )
     finally:
         try:
-            os.unlink(tmp.name)
+            os.unlink(ref_path)
         except OSError:
             pass
 
 
+# ============================================================
+# Mode: HTTP (FastAPI for Load Balancer endpoints)
+# ============================================================
+def _build_http_app():
+    """Lazily build FastAPI app. Only imported when SERVER_MODE=http."""
+    from fastapi import FastAPI, HTTPException
+    from fastapi.responses import StreamingResponse
+    from pydantic import BaseModel
+
+    app = FastAPI(title="Qwen3-TTS streaming worker")
+
+    class TTSRequest(BaseModel):
+        text: str
+        ref_audio_b64: str
+        ref_text: str = ""
+        language: str = "Korean"
+        chunk_size: int = 12
+        temperature: float = 0.9
+        top_k: int = 50
+        repetition_penalty: float = 1.05
+        instruct: Optional[str] = None
+
+    @app.get("/ping")
+    def ping():
+        return {"status": "ok", "model_loaded": True, "mode": "http"}
+
+    @app.post("/tts/stream")
+    def tts_stream(req: TTSRequest):
+        if not req.text.strip():
+            raise HTTPException(400, "empty text")
+        try:
+            ref_path = _write_ref_tempfile(req.ref_audio_b64)
+        except Exception as e:
+            raise HTTPException(400, f"invalid base64: {e}")
+
+        def event_gen():
+            try:
+                for ev in synthesize_stream(
+                    text=req.text.strip(),
+                    ref_audio_path=ref_path,
+                    ref_text=req.ref_text,
+                    language=req.language,
+                    chunk_size=req.chunk_size,
+                    temperature=req.temperature,
+                    top_k=req.top_k,
+                    repetition_penalty=req.repetition_penalty,
+                    instruct=req.instruct,
+                ):
+                    yield (json.dumps(ev) + "\n").encode()
+            finally:
+                try:
+                    os.unlink(ref_path)
+                except OSError:
+                    pass
+
+        return StreamingResponse(
+            event_gen(),
+            media_type="application/x-ndjson",
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        )
+
+    return app
+
+
+# ============================================================
+# Entrypoint
+# ============================================================
 if __name__ == "__main__":
-    runpod.serverless.start({
-        "handler": handler,
-        "return_aggregate_stream": True,
-    })
+    if SERVER_MODE == "http":
+        import uvicorn
+        port = int(os.environ.get("PORT", 80))
+        print(f"[init] starting HTTP server on :{port}", flush=True)
+        uvicorn.run(_build_http_app(), host="0.0.0.0", port=port, log_level="info")
+    else:
+        import runpod
+        _boot(f"runpod {getattr(runpod, '__version__', '?')} ok")
+        print("[init] starting RunPod queue worker", flush=True)
+        runpod.serverless.start({
+            "handler": handler,
+            "return_aggregate_stream": True,
+        })
