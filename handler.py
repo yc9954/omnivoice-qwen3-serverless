@@ -141,9 +141,13 @@ def synthesize_stream(
 
     Splits multi-sentence input and synthesizes each sentence separately,
     inserting ``inter_sentence_silence_ms`` of silence between sentences so
-    the output has natural sentence-level pauses. Single-sentence input is
-    unaffected (one streaming call, no silence)."""
-    sentences = _split_sentences(text)
+    the output has natural sentence-level pauses. Set to 0 to disable
+    splitting entirely and hand the full text to the model as one call —
+    the model's own prosody decides pause placement."""
+    if inter_sentence_silence_ms <= 0:
+        sentences = [text.strip()]
+    else:
+        sentences = _split_sentences(text)
     t0 = time.time()
     ttfa = None
     n_chunks = 0
