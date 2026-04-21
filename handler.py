@@ -128,7 +128,12 @@ def synthesize_stream(
     chunk_size: int = 12,
     temperature: float = 0.9,
     top_k: int = 50,
+    top_p: float = 1.0,
+    do_sample: bool = True,
     repetition_penalty: float = 1.05,
+    max_new_tokens: int = 2048,
+    min_new_tokens: int = 2,
+    xvec_only: bool = False,
     instruct: Optional[str] = None,
     inter_sentence_silence_ms: int = 250,
 ) -> Generator[dict, None, None]:
@@ -150,8 +155,11 @@ def synthesize_stream(
             language=language,
             ref_audio=ref_audio_path, ref_text=ref_text,
             chunk_size=chunk_size,
-            temperature=temperature, top_k=top_k,
+            temperature=temperature, top_k=top_k, top_p=top_p,
+            do_sample=do_sample,
             repetition_penalty=repetition_penalty,
+            max_new_tokens=max_new_tokens, min_new_tokens=min_new_tokens,
+            xvec_only=xvec_only,
         )
         if instruct:
             base_kwargs["instruct"] = instruct
@@ -241,8 +249,14 @@ def handler(job) -> Generator[dict, None, None]:
             chunk_size=int(job_input.get("chunk_size", 12)),
             temperature=float(job_input.get("temperature", 0.9)),
             top_k=int(job_input.get("top_k", 50)),
+            top_p=float(job_input.get("top_p", 1.0)),
+            do_sample=bool(job_input.get("do_sample", True)),
             repetition_penalty=float(job_input.get("repetition_penalty", 1.05)),
+            max_new_tokens=int(job_input.get("max_new_tokens", 2048)),
+            min_new_tokens=int(job_input.get("min_new_tokens", 2)),
+            xvec_only=bool(job_input.get("xvec_only", False)),
             instruct=job_input.get("instruct") or None,
+            inter_sentence_silence_ms=int(job_input.get("inter_sentence_silence_ms", 250)),
         )
     finally:
         try:
@@ -270,8 +284,14 @@ def _build_http_app():
         chunk_size: int = 12
         temperature: float = 0.9
         top_k: int = 50
+        top_p: float = 1.0
+        do_sample: bool = True
         repetition_penalty: float = 1.05
+        max_new_tokens: int = 2048
+        min_new_tokens: int = 2
+        xvec_only: bool = False
         instruct: Optional[str] = None
+        inter_sentence_silence_ms: int = 250
 
     @app.get("/ping")
     def ping():
@@ -296,8 +316,14 @@ def _build_http_app():
                     chunk_size=req.chunk_size,
                     temperature=req.temperature,
                     top_k=req.top_k,
+                    top_p=req.top_p,
+                    do_sample=req.do_sample,
                     repetition_penalty=req.repetition_penalty,
+                    max_new_tokens=req.max_new_tokens,
+                    min_new_tokens=req.min_new_tokens,
+                    xvec_only=req.xvec_only,
                     instruct=req.instruct,
+                    inter_sentence_silence_ms=req.inter_sentence_silence_ms,
                 ):
                     yield (json.dumps(ev) + "\n").encode()
             finally:
