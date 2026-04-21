@@ -108,6 +108,18 @@ def _float32_to_int16_b64(wav: np.ndarray) -> str:
 # ============================================================
 # Core generation — shared by both modes
 # ============================================================
+import re as _re
+
+_SENTENCE_SPLIT = _re.compile(r"(?<=[.!?。！？…])\s+")
+
+
+def _split_sentences(text: str) -> list:
+    """Split on sentence-ending punctuation, keeping it with the preceding
+    sentence. Collapses to a single-entry list for short input."""
+    parts = [p.strip() for p in _SENTENCE_SPLIT.split(text.strip()) if p.strip()]
+    return parts or [text.strip()]
+
+
 def synthesize_stream(
     text: str,
     ref_audio_path: str,
@@ -118,8 +130,15 @@ def synthesize_stream(
     top_k: int = 50,
     repetition_penalty: float = 1.05,
     instruct: Optional[str] = None,
+    inter_sentence_silence_ms: int = 250,
 ) -> Generator[dict, None, None]:
-    """Yield event dicts: meta → audio × N → done (or error)."""
+    """Yield event dicts: meta → audio × N → done (or error).
+
+    Splits multi-sentence input and synthesizes each sentence separately,
+    inserting ``inter_sentence_silence_ms`` of silence between sentences so
+    the output has natural sentence-level pauses. Single-sentence input is
+    unaffected (one streaming call, no silence)."""
+    sentences = _split_sentences(text)
     t0 = time.time()
     ttfa = None
     n_chunks = 0
@@ -127,33 +146,48 @@ def synthesize_stream(
     sr = 24000
     yielded_meta = False
     try:
-        kwargs = dict(
-            text=text, language=language,
+        base_kwargs = dict(
+            language=language,
             ref_audio=ref_audio_path, ref_text=ref_text,
             chunk_size=chunk_size,
             temperature=temperature, top_k=top_k,
             repetition_penalty=repetition_penalty,
         )
         if instruct:
-            kwargs["instruct"] = instruct
+            base_kwargs["instruct"] = instruct
 
-        for idx, (wav_chunk, chunk_sr, _info) in enumerate(
-            _MODEL.generate_voice_clone_streaming(**kwargs)
-        ):
-            if not yielded_meta:
-                sr = chunk_sr
-                yield {"type": "meta", "sr": sr, "text_chars": len(text)}
-                yielded_meta = True
-            if ttfa is None:
-                ttfa = time.time() - t0
-            n_chunks += 1
-            total_samples += len(wav_chunk)
-            yield {
-                "type": "audio",
-                "idx": idx,
-                "pcm_b64": _float32_to_int16_b64(wav_chunk),
-                "n_samples": len(wav_chunk),
-            }
+        for sent_idx, sentence in enumerate(sentences):
+            for (wav_chunk, chunk_sr, _info) in _MODEL.generate_voice_clone_streaming(
+                text=sentence, **base_kwargs,
+            ):
+                if not yielded_meta:
+                    sr = chunk_sr
+                    yield {"type": "meta", "sr": sr, "text_chars": len(text),
+                           "sentences": len(sentences)}
+                    yielded_meta = True
+                if ttfa is None:
+                    ttfa = time.time() - t0
+                total_samples += len(wav_chunk)
+                yield {
+                    "type": "audio",
+                    "idx": n_chunks,
+                    "pcm_b64": _float32_to_int16_b64(wav_chunk),
+                    "n_samples": len(wav_chunk),
+                }
+                n_chunks += 1
+
+            # Silence between sentences, not after the last one
+            if sent_idx < len(sentences) - 1 and inter_sentence_silence_ms > 0:
+                silence = np.zeros(int(sr * inter_sentence_silence_ms / 1000), dtype=np.float32)
+                total_samples += len(silence)
+                yield {
+                    "type": "audio",
+                    "idx": n_chunks,
+                    "pcm_b64": _float32_to_int16_b64(silence),
+                    "n_samples": len(silence),
+                    "silence": True,
+                }
+                n_chunks += 1
 
         elapsed = time.time() - t0
         duration = total_samples / sr if sr else 0.0
@@ -165,6 +199,7 @@ def synthesize_stream(
             "ttfa_ms": round((ttfa or 0) * 1000, 1),
             "elapsed_sec": round(elapsed, 3),
             "rtf": round(rtf, 4),
+            "sentences": len(sentences),
         }
     except Exception as e:
         yield {"type": "error", "message": f"{type(e).__name__}: {e}"}
