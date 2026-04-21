@@ -1,51 +1,41 @@
 # Qwen3-TTS streaming — RunPod Serverless image
-# Base: PyTorch 2.7.1 + CUDA 12.6.3 — driver 560+ required (broad RunPod worker coverage)
-# Tradeoff: cu128 has better Blackwell support but some serverless hosts lag driver versions
-FROM runpod/pytorch:0.7.0-cu1263-torch271-ubuntu2204
+# Base: PyTorch 2.8.0 + CUDA 12.9 — covers Ampere (sm_80) → Ada (sm_89) →
+# Hopper (sm_90) → Blackwell (sm_120) in one image.
+# Requires RunPod endpoint "Allowed CUDA Versions" set to 12.8 and/or 12.9.
+FROM runpod/pytorch:1.0.3-cu1290-torch280-ubuntu2404
 
 ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/root/.cache/huggingface \
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
     MODEL_PATH=/opt/model \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    TORCH_CUDA_ARCH_LIST=12.0 \
-    MAX_JOBS=4
+    TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;12.0" \
+    MAX_JOBS=4 \
+    WARMUP_ON_START=1
 
 WORKDIR /app
 
-# system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 ffmpeg git && \
     rm -rf /var/lib/apt/lists/*
 
-# python deps (cacheable layer)
 COPY requirements.txt .
-RUN python3 -m pip install --upgrade pip wheel ninja packaging && \
+RUN python3 -m pip install --upgrade pip wheel && \
     python3 -m pip install -r requirements.txt
 
-# install faster-qwen3-tts from source (PyPI lags)
+# faster-qwen3-tts from source (PyPI lags). Skips flash-attn; relies on
+# torch SDPA + CUDAGraph, which is what the library is actually optimized for.
+# Qwen3-TTS model card explicitly notes flash_attention_2 is incompatible.
 RUN git clone --depth=1 https://github.com/andimarafioti/faster-qwen3-tts.git /tmp/fqtts && \
     python3 -m pip install -e /tmp/fqtts
 
-# install flash-attn (sm_120 / Blackwell). Fall back to skip if wheel/build fails so the
-# container still runs (faster-qwen3-tts has a manual attention fallback).
-ARG SKIP_FLASH_ATTN=1
-RUN if [ "$SKIP_FLASH_ATTN" = "1" ]; then \
-      echo "SKIP_FLASH_ATTN=1, skipping"; \
-    else \
-      python3 -m pip install --no-build-isolation flash-attn==2.7.4.post1 \
-        || echo "flash-attn install failed — will fall back to manual attention at runtime" ; \
-    fi
-
-# bake the model (~4.3GB) into the image so cold start skips the download
-RUN python -c "\
+# bake the model (~4.3GB) into the image so cold start skips the HF download.
+# HF_HUB_ENABLE_HF_TRANSFER=1 above gives ~3-5x faster pulls.
+RUN python3 -c "\
 from huggingface_hub import snapshot_download; \
 snapshot_download(repo_id='Qwen/Qwen3-TTS-12Hz-1.7B-Base', local_dir='/opt/model')"
 
-# handler code (kept as last cheap layer for iteration)
 COPY handler.py /app/handler.py
 
-ENV WARMUP_ON_START=1
-
-# sh wrapper gives us early boot signal before Python runs
-CMD ["sh", "-c", "echo '[boot] sh entered'; which python3 || echo 'python3 MISSING'; python3 --version; echo '[boot] launching handler'; exec python3 -u /app/handler.py"]
+CMD ["sh", "-c", "echo '[boot] sh entered'; python3 --version; echo '[boot] launching handler'; exec python3 -u /app/handler.py"]
